@@ -8,7 +8,7 @@ namespace DdddOcrSharp
     /// <summary>
     /// DDDDOCR类
     /// </summary>
-    public class DDDDOCR : IDisposable
+    public partial class DDDDOCR : IDisposable
     {
         private DdddOcrMode Mode { get; }
         private DdddOcrOptions? Options { get; }
@@ -106,13 +106,6 @@ namespace DdddOcrSharp
         }
 
         /// <summary>
-        /// 实例回收
-        /// </summary>
-        ~DDDDOCR()
-        {
-            Dispose();
-        }
-        /// <summary>
         /// ddddocr解构函数
         /// </summary>
         public void Dispose()
@@ -138,12 +131,12 @@ namespace DdddOcrSharp
                 throw new InvalidOperationException("当前识别类型为目标检测");
             }
             using var image = Mat.FromImageData(bytes, ImreadModes.AnyColor);
-            if (image.Width == 0 && image.Height == 0)
+            if (image.Width == 0 || image.Height == 0)
             {
                 throw new InvalidOperationException("载入图像数据损坏或图片类型错误");
             }
             var inputs = ClassifyPrepareProcessing(image, pngFix);
-            IDisposableReadOnlyCollection<DisposableNamedOnnxValue> outputs = InferenceSession.Run(inputs);
+            using var outputs = InferenceSession.Run(inputs);
             var predictions = outputs.First(x => x.Name == "output").Value as DenseTensor<long>;
             if (predictions == null)
             {
@@ -161,13 +154,14 @@ namespace DdddOcrSharp
         static readonly float[] std = { 0.229f, 0.224f, 0.225f };
         private List<NamedOnnxValue> ClassifyPrepareProcessing(Mat image, bool pngFix = false)
         {
-            #region resize
-            Mat resizedImg;
             if (Options == null)
                 return new();
+
+            Mat resizedImg;
+            bool ownsResized = true;
+            #region resize
             if (Mode == DdddOcrMode.Import)
             {
-
                 if (Options.Resize.Width == -1)
                 {
                     if (Options.Word)
@@ -186,57 +180,84 @@ namespace DdddOcrSharp
 
                 if (Options.Channel == 1)
                 {
-                    //BGR2GRAY? RGB2GRAY?
-                    resizedImg = resizedImg.CvtColor(ColorConversionCodes.BGR2GRAY);
+                    var gray = resizedImg.CvtColor(ColorConversionCodes.BGR2GRAY);
+                    resizedImg.Dispose();
+                    resizedImg = gray;
                 }
                 else
                 {
                     if (pngFix)
                     {
-                        resizedImg = PngRgbaToRgbWhiteBackground(resizedImg);
+                        var fixed_ = PngRgbaToRgbWhiteBackground(resizedImg);
+                        if (!ReferenceEquals(fixed_, resizedImg))
+                        {
+                            resizedImg.Dispose();
+                            resizedImg = fixed_;
+                        }
                     }
                 }
             }
             else
             {
-                //BGR2GRAY? RGB2GRAY?
-                resizedImg = image.Resize(new Size(image.Width * Convert.ToDouble(64d / image.Height), 64d), interpolation: InterpolationFlags.Linear).CvtColor(ColorConversionCodes.BGR2GRAY);
+                var tmp = image.Resize(new Size(image.Width * Convert.ToDouble(64d / image.Height), 64d), interpolation: InterpolationFlags.Linear);
+                resizedImg = tmp.CvtColor(ColorConversionCodes.BGR2GRAY);
+                tmp.Dispose();
             }
             #endregion
 
-            #region tensor
-            int channels = resizedImg.Channels();
-            var tensor = new DenseTensor<float>(new int[] { 1, channels, resizedImg.Height, resizedImg.Width });
-            for (int y = 0; y < resizedImg.Height; y++)
+            try
             {
-                for (int x = 0; x < resizedImg.Width; x++)
+                #region tensor
+                int channels = resizedImg.Channels();
+                int height = resizedImg.Height;
+                int width = resizedImg.Width;
+                var tensor = new DenseTensor<float>(new int[] { 1, channels, height, width });
+
+                bool isImport = Mode == DdddOcrMode.Import;
+                bool singleChannel = channels == 1;
+
+                if (singleChannel)
                 {
-                    if (Mode == DdddOcrMode.Import)
+                    var indexer = resizedImg.GetGenericIndexer<byte>();
+                    // Import 单通道: 使用 mean=0.456 std=0.224; 其它模式: (c/255 - 0.5)/0.5
+                    float m = isImport ? 0.456f : 0.5f;
+                    float s = isImport ? 0.224f : 0.5f;
+                    for (int y = 0; y < height; y++)
                     {
-                        if (Options?.Channel == 1 || channels == 1)
+                        for (int x = 0; x < width; x++)
                         {
-                            byte color = resizedImg.Get<byte>(y, x);
-                            tensor[0, 0, y, x] = ((color / 255f) - 0.456f) / 0.224f;
+                            byte color = indexer[y, x];
+                            tensor[0, 0, y, x] = ((color / 255f) - m) / s;
                         }
-                        else
-                        {
-                            Vec3b color = resizedImg.Get<Vec3b>(y, x);
-                            for (int c = 0; c < channels; c++)
-                            {
-                                tensor[0, c, y, x] = ((color[c] / 255f) - mean[c]) / std[c];
-                            }
-                        }
-                    }
-                    else
-                    {
-                        byte color = resizedImg.Get<byte>(y, x);
-                        tensor[0, 0, y, x] = ((color / 255f) - 0.5f) / 0.5f;
                     }
                 }
+                else
+                {
+                    var indexer = resizedImg.GetGenericIndexer<Vec3b>();
+                    float m0 = mean[0], m1 = mean[1], m2 = mean[2];
+                    float s0 = std[0], s1 = std[1], s2 = std[2];
+                    for (int y = 0; y < height; y++)
+                    {
+                        for (int x = 0; x < width; x++)
+                        {
+                            Vec3b color = indexer[y, x];
+                            tensor[0, 0, y, x] = ((color.Item0 / 255f) - m0) / s0;
+                            tensor[0, 1, y, x] = ((color.Item1 / 255f) - m1) / s1;
+                            tensor[0, 2, y, x] = ((color.Item2 / 255f) - m2) / s2;
+                        }
+                    }
+                }
+
+                return new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor("input1", tensor) };
+                #endregion
             }
-            resizedImg.Dispose();
-            return new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor("input1", tensor) };
-            #endregion
+            finally
+            {
+                if (ownsResized)
+                {
+                    resizedImg.Dispose();
+                }
+            }
         }
 
         private Mat PngRgbaToRgbWhiteBackground(Mat src)
@@ -246,15 +267,11 @@ namespace DdddOcrSharp
                 return src;
             }
             var whiteBackground = new Mat(src.Size(), MatType.CV_8UC3, Scalar.White);
-            var srcChannels = Cv2.Split(src);
-            using Mat alphaChannel = srcChannels[3];
             using var rgb = new Mat();
-            Cv2.Merge(new[] { srcChannels[0], srcChannels[1], srcChannels[2] }, rgb);
+            Cv2.CvtColor(src, rgb, ColorConversionCodes.BGRA2BGR);
+            using var alphaChannel = new Mat();
+            Cv2.ExtractChannel(src, alphaChannel, 3);
             rgb.CopyTo(whiteBackground, alphaChannel);
-            foreach (var mat in srcChannels)
-            {
-                mat.Dispose();
-            }
             return whiteBackground;
         }
         #endregion
@@ -273,13 +290,13 @@ namespace DdddOcrSharp
                 throw new InvalidOperationException("当前识别类型为文字识别");
             }
             using var image = Mat.FromImageData(bytes, ImreadModes.AnyColor);
-            if (image.Width == 0 && image.Height == 0)
+            if (image.Width == 0 || image.Height == 0)
             {
                 throw new InvalidOperationException("载入图像数据损坏或图片类型错误");
             }
             var inputSize = new Size(416, 416);
             var inputs = DetectPrepareProcessing(image, inputSize);
-            IDisposableReadOnlyCollection<DisposableNamedOnnxValue> outputs = InferenceSession.Run(inputs);
+            using var outputs = InferenceSession.Run(inputs);
             var predictions = outputs.First(x => x.Name == "output").Value as DenseTensor<float>;
             var bboxs = DetectHandleProcessing(predictions, image);
             return bboxs;
@@ -288,10 +305,10 @@ namespace DdddOcrSharp
         private List<NamedOnnxValue> DetectPrepareProcessing(Mat image, Size inputSize)
         {
             #region resize
-            //swap ??= new List<int> { 2, 0, 1 };
             Mat paddedImg;
+            int channels = image.Channels();
 
-            if (image.Channels() == 3)
+            if (channels == 3)
             {
                 paddedImg = new Mat(inputSize, MatType.CV_8UC3, new Scalar(114, 114, 114));
             }
@@ -301,32 +318,52 @@ namespace DdddOcrSharp
             }
 
             float ratio = Math.Min((float)inputSize.Height / image.Rows, (float)inputSize.Width / image.Cols);
-            var resizedImg = new Mat();
+            using var resizedImg = new Mat();
             Cv2.Resize(image, resizedImg, new Size((int)(image.Cols * ratio), (int)(image.Rows * ratio)), 0, 0, InterpolationFlags.Linear);
 
             resizedImg.CopyTo(paddedImg[new Rect(0, 0, resizedImg.Cols, resizedImg.Rows)]);
-
-
             #endregion
 
-            #region tensor
-            int channels = resizedImg.Channels();
-
-            var tensor = new DenseTensor<float>(new int[] { 1, channels, inputSize.Height, inputSize.Width });
-            for (int i = 0; i < paddedImg.Height; i++)
+            try
             {
-                for (int j = paddedImg.Height - 1; j >= 0; j--)
+                #region tensor
+                int height = paddedImg.Height;
+                int width = paddedImg.Width;
+                var tensor = new DenseTensor<float>(new int[] { 1, channels, height, width });
+
+                if (channels == 1)
                 {
-                    Vec3b color = paddedImg.Get<Vec3b>(i, j);
-                    for (int c = 0; c < channels; c++)
+                    var indexer = paddedImg.GetGenericIndexer<byte>();
+                    for (int y = 0; y < height; y++)
                     {
-                        tensor[0, c, i, j] = color[c];
+                        for (int x = 0; x < width; x++)
+                        {
+                            tensor[0, 0, y, x] = indexer[y, x];
+                        }
                     }
                 }
-            }
+                else
+                {
+                    var indexer = paddedImg.GetGenericIndexer<Vec3b>();
+                    for (int y = 0; y < height; y++)
+                    {
+                        for (int x = 0; x < width; x++)
+                        {
+                            Vec3b color = indexer[y, x];
+                            tensor[0, 0, y, x] = color.Item0;
+                            tensor[0, 1, y, x] = color.Item1;
+                            tensor[0, 2, y, x] = color.Item2;
+                        }
+                    }
+                }
 
-            return new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor("images", tensor) };
-            #endregion
+                return new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor("images", tensor) };
+                #endregion
+            }
+            finally
+            {
+                paddedImg.Dispose();
+            }
         }
 
 
@@ -423,15 +460,16 @@ namespace DdddOcrSharp
             }
             return result;
         }
-        private int[] MakeGrid(int a, int b)
-        {
-            int[] ret = new int[a * b * 2];
+        private int[] MakeGrid(int a, int b) => MakeGridCore(a, b);
 
-            for (int i = 0; i < a; i++)
+        internal static int[] MakeGridCore(int hsize, int wsize)
+        {
+            int[] ret = new int[hsize * wsize * 2];
+            for (int i = 0; i < hsize; i++)
             {
-                for (int j = 0; j < b; j += 1)
+                for (int j = 0; j < wsize; j++)
                 {
-                    int index = (i * a + j) * 2;
+                    int index = (i * wsize + j) * 2;
                     ret[index] = j;
                     ret[index + 1] = i;
                 }
@@ -442,11 +480,7 @@ namespace DdddOcrSharp
         private int[] Makeexpanded_stride(int a, int b)
         {
             int[] ret = new int[a];
-
-            for (int i = 0; i < a; i++)
-            {
-                ret[i] = b;
-            }
+            Array.Fill(ret, b);
             return ret;
         }
         #endregion
@@ -462,22 +496,22 @@ namespace DdddOcrSharp
         {
             int start_x = 0, start_y = 0;
             // 将图像转换为灰度图，以便进行差异计算
+            using var bgGray = background.CvtColor(ColorConversionCodes.BGR2GRAY);
+            using var tgGray = target.CvtColor(ColorConversionCodes.BGR2GRAY);
 
-            background = background.CvtColor(ColorConversionCodes.BGR2GRAY);
-            target = target.CvtColor(ColorConversionCodes.BGR2GRAY);
+            // 计算灰度图像的差异
+            using var diffRaw = new Mat();
+            Cv2.Absdiff(bgGray, tgGray, diffRaw);
 
-            // 计算灰度图像的差异  
-            Mat difference = new();
-            Cv2.Absdiff(background, target, difference); // 使用OpenCV的AbsDiff方法来计算差异  
-
-            difference = difference.Threshold(80, 255, ThresholdTypes.Binary);
+            using var difference = diffRaw.Threshold(80, 255, ThresholdTypes.Binary);
+            var indexer = difference.GetGenericIndexer<byte>();
             for (var i = 0; i < difference.Width; i++)
             {
                 int mcount = 0;
                 for (var j = 0; j < difference.Height; j++)
                 {
-                    var p = difference.Get<Vec3b>(j, i);
-                    if (p.Item2 != 0)
+                    byte p = indexer[j, i];
+                    if (p != 0)
                     {
                         mcount += 1;
                     }
@@ -492,8 +526,7 @@ namespace DdddOcrSharp
                     break;
                 }
             }
-            Point point = new(start_x, start_y);
-            return point;
+            return new Point(start_x, start_y);
         }
 
         /// <summary>
@@ -530,45 +563,54 @@ namespace DdddOcrSharp
             }
             else
             {
-                target = Cv2.ImDecode(targetMat.ImEncode(), ImreadModes.AnyColor);
+                target = targetMat.Clone();
             }
 
             lockTarget = target;
 
-            Mat background = Cv2.ImDecode(backgroundMat.ImEncode(), ImreadModes.AnyColor);
+            Mat background = backgroundMat.Clone();
             mTarget_Y = targetPoint.Y + target_y;
             if (targetPoint != default)
             {
-                ;
-                background = background.Clone(new Rect(0, mTarget_Y, backgroundMat.Width, backgroundMat.Height - mTarget_Y));
+                var cropped = background.Clone(new Rect(0, mTarget_Y, backgroundMat.Width, backgroundMat.Height - mTarget_Y));
+                background.Dispose();
+                background = cropped;
             }
-            Mat cbackground = new();
-            Mat ctarget = new();
 
-            background = background.GaussianBlur(new Size(3, 3), 3).CvtColor(ColorConversionCodes.BGR2GRAY).Threshold(128, 255, ThresholdTypes.Binary).MedianBlur(3);
-            target = target.GaussianBlur(new Size(3, 3), 0.5).CvtColor(ColorConversionCodes.BGR2GRAY).Threshold(128, 255, ThresholdTypes.Binary);
-            var kernel1 = Cv2.GetStructuringElement(MorphShapes.Rect, new OpenCvSharp.Size(5, 5), new OpenCvSharp.Point(-1, -1));
-            Cv2.MorphologyEx(background, background, MorphTypes.Close, kernel1);
-            Cv2.MorphologyEx(target, target, MorphTypes.Close, kernel1);
+            try
+            {
+                using var kernel1 = Cv2.GetStructuringElement(MorphShapes.Rect, new Size(5, 5), new Point(-1, -1));
 
-            Cv2.Canny(background, cbackground, 100, 200);
-            Cv2.Canny(target, ctarget, 100, 200);
+                using var bgProcessed = background.GaussianBlur(new Size(3, 3), 3).CvtColor(ColorConversionCodes.BGR2GRAY).Threshold(128, 255, ThresholdTypes.Binary).MedianBlur(3);
+                using var tgProcessed = target.GaussianBlur(new Size(3, 3), 0.5).CvtColor(ColorConversionCodes.BGR2GRAY).Threshold(128, 255, ThresholdTypes.Binary);
 
-            Cv2.CvtColor(cbackground, background, ColorConversionCodes.GRAY2BGR);
-            Cv2.CvtColor(ctarget, target, ColorConversionCodes.GRAY2BGR);
-            //#if DEBUG
-            //            Cv2.ImShow("background1", background);
-            //            Cv2.ImShow("target", ctarget);
-            //            //Cv2.WaitKey(0);
-            //#endif
-            Mat res = new();
-            Cv2.MatchTemplate(background, target, res, TemplateMatchModes.CCoeffNormed);
+                Cv2.MorphologyEx(bgProcessed, bgProcessed, MorphTypes.Close, kernel1);
+                Cv2.MorphologyEx(tgProcessed, tgProcessed, MorphTypes.Close, kernel1);
 
-            Cv2.MinMaxLoc(res, out _, out _, out _, out Point maxLoc);
+                using var cbackground = new Mat();
+                using var ctarget = new Mat();
+                Cv2.Canny(bgProcessed, cbackground, 100, 200);
+                Cv2.Canny(tgProcessed, ctarget, 100, 200);
 
-            var mRect = new Rect(maxLoc.X, simpleTarget == true ? maxLoc.Y : mTarget_Y, lockTarget.Width, lockTarget.Height);
+                using var bgBgr = new Mat();
+                using var tgBgr = new Mat();
+                Cv2.CvtColor(cbackground, bgBgr, ColorConversionCodes.GRAY2BGR);
+                Cv2.CvtColor(ctarget, tgBgr, ColorConversionCodes.GRAY2BGR);
 
-            return (mTarget_Y, mRect);
+                using var res = new Mat();
+                Cv2.MatchTemplate(bgBgr, tgBgr, res, TemplateMatchModes.CCoeffNormed);
+
+                Cv2.MinMaxLoc(res, out _, out _, out _, out Point maxLoc);
+
+                var mRect = new Rect(maxLoc.X, simpleTarget == true ? maxLoc.Y : mTarget_Y, lockTarget.Width, lockTarget.Height);
+
+                return (mTarget_Y, mRect);
+            }
+            finally
+            {
+                background.Dispose();
+                target.Dispose();
+            }
         }
 
 

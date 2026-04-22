@@ -24,15 +24,17 @@ namespace DdddOcrSharp
         /// 通道数
         /// </summary>
         public int Channel { get; set; } = 1;
+        private static readonly JsonSerializerOptions s_jsonOptions = new()
+        {
+            Converters = { new SizeJsonConverter() }
+        };
         /// <summary>
         /// 转换成JSON的字符串
         /// </summary>
         /// <returns>返回文本数据</returns>
         public string ToJson()
         {
-            JsonSerializerOptions jsonOptions = new();
-            jsonOptions.Converters.Add(new SizeJsonConverter());
-            return JsonSerializer.Serialize(this, jsonOptions);
+            return JsonSerializer.Serialize(this, s_jsonOptions);
         }
         /// <summary>
         /// 从json结构中读取数据
@@ -41,9 +43,7 @@ namespace DdddOcrSharp
         /// <returns></returns>
         public static DdddOcrOptions? FromJson(string json)
         {
-            JsonSerializerOptions jsonOptions = new();
-            jsonOptions.Converters.Add(new SizeJsonConverter());
-            return JsonSerializer.Deserialize<DdddOcrOptions>(json, jsonOptions);
+            return JsonSerializer.Deserialize<DdddOcrOptions>(json, s_jsonOptions);
         }
         /// <summary>
         /// 从json文件中读取数据

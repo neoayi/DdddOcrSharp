@@ -27,7 +27,7 @@ namespace DdddOcrSharp
 
         private static void EnsureMode(this DDDDOCR predictor, DdddOcrMode mode)
         {
-            if (Enum.IsDefined(mode))
+            if (!Enum.IsDefined(mode))
                 throw new InvalidOperationException($"The mode does not support {mode}");
         }
         /// <summary>
