@@ -55,14 +55,14 @@ namespace DdddOcrSharp
         }
 
         /// <summary>
-        /// 异步滑块位置识别算法 2。
+        /// 异步滑块位置识别算法（对齐 Python ddddocr <c>slide_match</c>）。
         /// </summary>
-        public static Task<(int, Rect)> SlideMatchAsync(Mat targetMat, Mat backgroundMat, int target_y = 0, bool simpleTarget = false, bool flag = false, CancellationToken cancellationToken = default)
+        public static Task<SlideMatchResult> SlideMatchAsync(Mat target, Mat background, bool simpleTarget = false, CancellationToken cancellationToken = default)
         {
             return Task.Run(() =>
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                return SlideMatch(targetMat, backgroundMat, target_y, simpleTarget, flag);
+                return SlideMatch(target, background, simpleTarget);
             }, cancellationToken);
         }
     }

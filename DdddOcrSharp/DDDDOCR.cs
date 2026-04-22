@@ -530,128 +530,59 @@ namespace DdddOcrSharp
         }
 
         /// <summary>
-        /// 滑块位置识别算法2
+        /// 滑块位置识别算法（对齐 Python ddddocr <c>slide_match</c>）。
         /// </summary>
-        /// <param name="targetMat">滑块图片</param>
-        /// <param name="backgroundMat">带缺口背景图片</param>
-        /// <param name="target_y">缺口Y轴坐标</param>
-        /// <param name="simpleTarget"></param>
-        /// <param name="flag">报错标识</param>
-        /// <returns></returns>
-
-        public static (int, Rect) SlideMatch(Mat targetMat, Mat backgroundMat, int target_y = 0, bool simpleTarget = false, bool flag = false)
+        /// <param name="target">滑块图片（仅包含滑块模板）</param>
+        /// <param name="background">带缺口的背景图片</param>
+        /// <param name="simpleTarget">
+        /// 是否为简单滑块：
+        /// true  -> 直接在灰度图上做模板匹配；
+        /// false -> 先 Canny(50,150) 边缘检测，再模板匹配（默认，适合带花纹背景）。
+        /// </param>
+        /// <returns>匹配结果：包含滑块在背景中的矩形、中心点与置信度</returns>
+        /// <exception cref="ArgumentNullException">入参为 null 时抛出</exception>
+        /// <exception cref="InvalidOperationException">背景小于滑块无法匹配时抛出</exception>
+        public static SlideMatchResult SlideMatch(Mat target, Mat background, bool simpleTarget = false)
         {
-            Mat target;
-            Mat lockTarget;
-            Point targetPoint = default;
-            int mTarget_Y = 0;
-            if (!simpleTarget)
+            ArgumentNullException.ThrowIfNull(target);
+            ArgumentNullException.ThrowIfNull(background);
+
+            if (target.Empty() || background.Empty())
             {
-                try
-                {
-                    // Assuming GetTarget is a method that returns a Bitmap, targetX and targetY
-                    (target, targetPoint) = GetTarget(targetMat);
-                }
-                catch (Exception)
-                {
-                    if (flag)
-                    {
-                        throw;
-                    }
-                    return SlideMatch(targetMat, backgroundMat, target_y, true, true);
-                }
+                throw new InvalidOperationException("target / background 图像数据为空");
+            }
+            if (background.Width < target.Width || background.Height < target.Height)
+            {
+                throw new InvalidOperationException("背景图尺寸小于滑块，无法进行模板匹配");
+            }
+
+            // Python 先将图像转为 RGB numpy 数组；OpenCvSharp 读入的是 BGR，通道顺序在灰度化后等价，
+            // 所以直接 BGR->灰度即可，不必先 BGR2RGB。
+            using var targetGray = new Mat();
+            using var backgroundGray = new Mat();
+            Cv2.CvtColor(target, targetGray, ColorConversionCodes.BGR2GRAY);
+            Cv2.CvtColor(background, backgroundGray, ColorConversionCodes.BGR2GRAY);
+
+            using var res = new Mat();
+            if (simpleTarget)
+            {
+                // Python: cv2.matchTemplate(background_gray, target_gray, TM_CCOEFF_NORMED)
+                Cv2.MatchTemplate(backgroundGray, targetGray, res, TemplateMatchModes.CCoeffNormed);
             }
             else
             {
-                target = targetMat.Clone();
+                // Python: Canny(50,150) 后再模板匹配
+                using var targetEdges = new Mat();
+                using var backgroundEdges = new Mat();
+                Cv2.Canny(targetGray, targetEdges, 50, 150);
+                Cv2.Canny(backgroundGray, backgroundEdges, 50, 150);
+                Cv2.MatchTemplate(backgroundEdges, targetEdges, res, TemplateMatchModes.CCoeffNormed);
             }
 
-            lockTarget = target;
+            Cv2.MinMaxLoc(res, out _, out double maxVal, out _, out Point maxLoc);
 
-            Mat background = backgroundMat.Clone();
-            mTarget_Y = targetPoint.Y + target_y;
-            if (targetPoint != default)
-            {
-                var cropped = background.Clone(new Rect(0, mTarget_Y, backgroundMat.Width, backgroundMat.Height - mTarget_Y));
-                background.Dispose();
-                background = cropped;
-            }
-
-            try
-            {
-                using var kernel1 = Cv2.GetStructuringElement(MorphShapes.Rect, new Size(5, 5), new Point(-1, -1));
-
-                using var bgProcessed = background.GaussianBlur(new Size(3, 3), 3).CvtColor(ColorConversionCodes.BGR2GRAY).Threshold(128, 255, ThresholdTypes.Binary).MedianBlur(3);
-                using var tgProcessed = target.GaussianBlur(new Size(3, 3), 0.5).CvtColor(ColorConversionCodes.BGR2GRAY).Threshold(128, 255, ThresholdTypes.Binary);
-
-                Cv2.MorphologyEx(bgProcessed, bgProcessed, MorphTypes.Close, kernel1);
-                Cv2.MorphologyEx(tgProcessed, tgProcessed, MorphTypes.Close, kernel1);
-
-                using var cbackground = new Mat();
-                using var ctarget = new Mat();
-                Cv2.Canny(bgProcessed, cbackground, 100, 200);
-                Cv2.Canny(tgProcessed, ctarget, 100, 200);
-
-                using var bgBgr = new Mat();
-                using var tgBgr = new Mat();
-                Cv2.CvtColor(cbackground, bgBgr, ColorConversionCodes.GRAY2BGR);
-                Cv2.CvtColor(ctarget, tgBgr, ColorConversionCodes.GRAY2BGR);
-
-                using var res = new Mat();
-                Cv2.MatchTemplate(bgBgr, tgBgr, res, TemplateMatchModes.CCoeffNormed);
-
-                Cv2.MinMaxLoc(res, out _, out _, out _, out Point maxLoc);
-
-                var mRect = new Rect(maxLoc.X, simpleTarget == true ? maxLoc.Y : mTarget_Y, lockTarget.Width, lockTarget.Height);
-
-                return (mTarget_Y, mRect);
-            }
-            finally
-            {
-                background.Dispose();
-                target.Dispose();
-            }
-        }
-
-
-        /// <summary>
-        /// 获取滑块精确方块内容
-        /// </summary>
-        /// <param name="image">滑块图片字节集</param>
-        /// <returns></returns>
-        public static (Mat, Point) GetTarget(Mat image)
-        {
-            Mat Result = new Mat(image.Size(), MatType.CV_8UC3, Scalar.White);
-            Point point = new Point();
-
-            Mat bw = new Mat();
-
-            bw = image.GaussianBlur(new Size(3, 3), 3).CvtColor(ColorConversionCodes.BGR2GRAY).Threshold(128, 255, ThresholdTypes.Binary);
-            Mat ctarget = new();
-            Cv2.Canny(bw, ctarget, 100, 300);
-            //Cv2.ImShow("Canny Contours", ctarget);
-            OpenCvSharp.Point[][] contours;
-            Cv2.FindContours(ctarget, out contours, out _, RetrievalModes.External, ContourApproximationModes.ApproxSimple);
-
-            double maxArea = 0;
-            // 筛选矩形轮廓
-            for (var i = 0; i < contours.Length; i++)
-            {
-
-                var rect = Cv2.BoundingRect(contours[i]);
-                if (rect.Width * rect.Height > maxArea && Convert.ToDouble(rect.Width) / image.Width > 0.5)
-                {
-                    maxArea = rect.Width * rect.Height;
-
-                    point.X = rect.X; point.Y = rect.Y;
-
-                    Result = image.Clone(rect);
-
-                }
-
-            }
-
-            return (Result, point);
+            var rect = new Rect(maxLoc.X, maxLoc.Y, target.Width, target.Height);
+            return new SlideMatchResult(rect, maxVal);
         }
         #endregion
     }

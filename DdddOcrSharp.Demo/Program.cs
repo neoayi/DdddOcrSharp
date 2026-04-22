@@ -9,8 +9,6 @@ namespace DdddOcr.Demo
     {
         static void Main(string[] args)
         {
-            Mat tg = new("tg1.png", ImreadModes.AnyColor);
-            Mat bg = new("bg1.png", ImreadModes.AnyColor);
             Mat ocr = new("ocr.jpg", ImreadModes.AnyColor);
             Mat det = new("det.png", ImreadModes.AnyColor);
 
@@ -18,31 +16,44 @@ namespace DdddOcr.Demo
             DDDDOCR ddddOcrOcrOld = new(DdddOcrMode.ClassifyOld);
             DDDDOCR ddddOcrOcrNew = new(DdddOcrMode.ClassifyBeta);
 
-
-
             var OcrOldResult = ddddOcrOcrOld.Classify(ocr.ToBytes());
             Console.WriteLine("旧版本文本识别结果：" + OcrOldResult);
-            Console.WriteLine("\r\n");
+            Console.WriteLine();
 
             var OcrNewResult = ddddOcrOcrNew.Classify(ocr.ToBytes());
             Console.WriteLine("新版本文本识别结果：" + OcrNewResult);
-            Console.WriteLine("\r\n");
+            Console.WriteLine();
 
             var Detresult = ddddOcrDet.Detect(det.ToBytes());
             foreach (var item in Detresult)
             {
                 det.Rectangle(item, new Scalar(0, 0, 255), 2);
             }
-
             Cv2.ImShow("det", det);
             Console.WriteLine("目标识别到的坐标为：" + JsonSerializer.Serialize(Detresult));
-            Console.WriteLine("\r\n");
-            Console.WriteLine(bg.Width);
-            var (target_y, rect) = DDDDOCR.SlideMatch(tg, bg,44,true);
-            Console.WriteLine("SlideMatch滑块的Y坐标为：" + target_y + "\r\nSlideMatch滑块缺口方框为:" + JsonSerializer.Serialize<Rect>(rect));
-            bg.Rectangle(rect, new Scalar(0, 0, 255), 2);
-            Cv2.ImShow("SlideMatch", bg);
-            Console.WriteLine("\r\n");
+            Console.WriteLine();
+
+            // 遍历所有 (tg, bg) 样本对做 SlideMatch 视觉验证
+            string[] pairs = { "", "1", "2", "3", "4" };
+            foreach (var suffix in pairs)
+            {
+                var tgPath = $"tg{suffix}.png";
+                var bgPath = $"bg{suffix}.png";
+                if (!System.IO.File.Exists(tgPath) || !System.IO.File.Exists(bgPath))
+                    continue;
+
+                using var tg = new Mat(tgPath, ImreadModes.AnyColor);
+                using var bg = new Mat(bgPath, ImreadModes.AnyColor);
+
+                var result = DDDDOCR.SlideMatch(tg, bg);
+                Console.WriteLine($"[tg{suffix}/bg{suffix}] rect={JsonSerializer.Serialize(result.Target)} center=({result.TargetX},{result.TargetY}) conf={result.Confidence:F3}");
+
+                using var preview = bg.Clone();
+                preview.Rectangle(result.Target, new Scalar(0, 0, 255), 2);
+                Cv2.ImShow($"SlideMatch-{(string.IsNullOrEmpty(suffix) ? "0" : suffix)}", preview);
+            }
+
+            Console.WriteLine();
             Cv2.WaitKey(0);
         }
     }
